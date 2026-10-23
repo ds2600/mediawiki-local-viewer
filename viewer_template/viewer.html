@@ -105,6 +105,7 @@ function inlineMd(s) {
   s = s.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  s = s.replace(/~~([^~]+)~~/g, '<s>$1</s>');
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   s = s.replace(/&lt;(https?:\/\/[^&\s]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
   return s;
@@ -118,6 +119,21 @@ function splitTableRow(line) {
 }
 
 function mdToHtml(src) {
+  // The builder promotes a whitelist of HTML tags (div/span/table/a/...) to
+  // real markup, already sanitized at build time, and marks each resolved
+  // fragment with \x02HTML<n>\x02...\x02HTML<n>\x02. Pull those out *before*
+  // escaping so they survive verbatim instead of being escaped like any
+  // other stray text, then splice them back in once Markdown processing is
+  // done. Everything else in this function still treats the input as plain
+  // text to be escaped first - this is the only place raw HTML is trusted,
+  // and only because the builder already restricted and sanitized it.
+  var trustedBlocks = [];
+  src = src.replace(/\x02HTML(\d+)\x02([\s\S]*?)\x02HTML\1\x02/g, function (_, idx, inner) {
+    var token = '\x02PH' + trustedBlocks.length + '\x02';
+    trustedBlocks.push(inner);
+    return token;
+  });
+
   var lines = escapeHtml(src).split('\n');
   var html = '';
   var i = 0;
@@ -140,6 +156,13 @@ function mdToHtml(src) {
       while (i < lines.length && !/^```/.test(lines[i].trim())) { code.push(lines[i]); i++; }
       i++;
       html += '<pre><code>' + code.join('\n') + '</code></pre>';
+      continue;
+    }
+
+    if (/^-{3,}$/.test(line.trim())) {
+      closeAllLists();
+      html += '<hr>';
+      i++;
       continue;
     }
 
@@ -200,6 +223,7 @@ function mdToHtml(src) {
     while (i < lines.length && lines[i].trim() !== '' &&
            !/^#{1,6}\s+/.test(lines[i]) &&
            !/^```/.test(lines[i].trim()) &&
+           !/^-{3,}$/.test(lines[i].trim()) &&
            !/^\s*([-*]|\d+\.)\s+/.test(lines[i]) &&
            !/^\|.*\|$/.test(lines[i].trim())) {
       para.push(lines[i]);
@@ -208,6 +232,10 @@ function mdToHtml(src) {
     html += '<p>' + inlineMd(para.join(' ')) + '</p>';
   }
   closeAllLists();
+
+  if (trustedBlocks.length) {
+    html = html.replace(/\x02PH(\d+)\x02/g, function (_, idx) { return trustedBlocks[Number(idx)]; });
+  }
   return html;
 }
 
@@ -310,7 +338,12 @@ function toExportMarkdown(entry, content) {
     return '# ' + entry.title + '\n\nRedirects to **' + content.target + '**.\n';
   }
   if (content.type === 'md') {
-    return '# ' + entry.title + '\n\n' + content.content + '\n';
+    // Pages with promoted raw HTML (div/table/span/...) carry a separate
+    // "export" string with the wrapper tags stripped back to plain
+    // text/Markdown - the builder only includes it when it actually
+    // differs from the view content.
+    var body = (content.export !== undefined) ? content.export : content.content;
+    return '# ' + entry.title + '\n\n' + body + '\n';
   }
   if (content.type === 'bigtext') {
     return '# ' + entry.title + '\n\n' + content.text;
@@ -359,6 +392,68 @@ function copyMarkdown(entry, content) {
   } else {
     flashStatus('Clipboard unavailable - use Download instead');
   }
+}
+
+function escapeScriptClose(s) {
+  // A page's content can legitimately contain a literal script-closing tag
+  // (e.g. a documented HTML snippet). Embedding that raw inside a real
+  // <script> block would terminate it early, so break up the sequence.
+  return s.replace(/<\/script/gi, '<\\/script');
+}
+
+function buildStandaloneHtml(entry, content) {
+  // Reuses the exact same rendering functions already running on this page
+  // (via Function.prototype.toString()) so a standalone export can never
+  // drift out of sync with how the main viewer actually renders a page -
+  // whatever renderPage()/renderBigTable()/mdToHtml() do here is exactly
+  // what ends up in the exported file.
+  var styleEl = document.querySelector('style');
+  var cssText = styleEl ? styleEl.textContent : '';
+
+  var funcs = [
+    escapeHtml, inlineMd, splitTableRow, mdToHtml,
+    renderBigTable, renderTableWindow, renderBigText, renderTextWindow,
+    cleanCell, toExportMarkdown, sanitizeFilename, escapeScriptClose,
+    downloadMarkdown, copyMarkdown, flashStatus, renderPage,
+    buildStandaloneHtml, downloadStandaloneHtml
+  ].map(function (f) { return f.toString(); }).join('\n\n');
+
+  var vars = 'var tableState = null, textState = null, flashTimer = null, PAGES_INDEX = [];';
+  var data = 'var PAGE_ENTRY = ' + JSON.stringify(entry) + ';\nvar PAGE_CONTENT_DATA = ' + JSON.stringify(content) + ';';
+  var boot = 'renderPage(PAGE_ENTRY, PAGE_CONTENT_DATA);';
+  var script = escapeScriptClose(['"use strict";', vars, data, funcs, boot].join('\n'));
+
+  return [
+    '<!DOCTYPE html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="UTF-8">',
+    '<title>' + escapeHtml(entry.title) + '</title>',
+    '<style>' + cssText + '</style>',
+    '</head>',
+    '<body>',
+    '<div id="app"><div id="main"><div id="content-pane"></div></div></div>',
+    '<div id="status-flash"></div>',
+    '<script>',
+    script,
+    '<\/script>',
+    '</body>',
+    '</html>',
+    ''
+  ].join('\n');
+}
+
+function downloadStandaloneHtml(entry, content) {
+  var html = buildStandaloneHtml(entry, content);
+  var blob = new Blob([html], { type: 'text/html' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = sanitizeFilename(entry.title) + '.html';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+  flashStatus('Standalone HTML exported (' + Math.round(blob.size / 1024) + ' KB)');
 }
 
 var flashTimer = null;
@@ -426,8 +521,15 @@ function renderPage(entry, content) {
   var copyBtn = document.createElement('button');
   copyBtn.textContent = 'Copy to clipboard';
   copyBtn.onclick = function () { copyMarkdown(entry, content); };
+  var htmlBtn = document.createElement('button');
+  htmlBtn.textContent = 'Export as standalone HTML';
+  htmlBtn.title = content.type === 'bigtable'
+    ? 'Single HTML file with the full table + search, openable by anyone with no setup'
+    : 'Single HTML file, openable by anyone with no setup';
+  htmlBtn.onclick = function () { downloadStandaloneHtml(entry, content); };
   actions.appendChild(dlBtn);
   actions.appendChild(copyBtn);
+  actions.appendChild(htmlBtn);
   header.appendChild(actions);
 
   pane.appendChild(header);
