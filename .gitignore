@@ -1,0 +1,10 @@
+# Generated viewer output - never commit (contains the wiki's actual content)
+/output/
+/out/
+/dist/
+
+# MediaWiki XML exports - never commit
+*.xml
+
+__pycache__/
+*.pyc

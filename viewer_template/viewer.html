@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wiki Viewer</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-alt: #f4f5f7;
+    --fg: #1b1f23;
+    --fg-muted: #5b6270;
+    --border: #d9dce1;
+    --accent: #2a66c7;
+    --badge-bg: #fff2cc;
+    --badge-fg: #6b5900;
+    --code-bg: #eef0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1e23;
+      --bg-alt: #23272e;
+      --fg: #e5e7eb;
+      --fg-muted: #9aa1ac;
+      --border: #3a3f47;
+      --accent: #6ea4f2;
+      --badge-bg: #4a3f17;
+      --badge-fg: #f0dca0;
+      --code-bg: #2a2f37;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #sidebar { width: 340px; min-width: 240px; max-width: 50vw; border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--bg-alt); resize: horizontal; overflow: auto; }
+  #search-box { padding: 10px; border-bottom: 1px solid var(--border); }
+  #search-box input { width: 100%; padding: 8px; font-size: 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
+  #result-count { font-size: 12px; color: var(--fg-muted); padding: 4px 10px; }
+  #page-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+  #page-list li { padding: 8px 10px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  #page-list li:hover { background: var(--code-bg); }
+  #page-list li.active { background: var(--accent); color: #fff; }
+  #page-list li .tag { font-size: 11px; opacity: 0.8; }
+  #main { flex: 1; overflow-y: auto; }
+  #content-pane { max-width: none; width: 100%; margin: 0; padding: 24px 32px 80px; }
+  .content-header h1 { margin: 0 0 8px; font-size: 24px; word-break: break-word; }
+  .access-badge { display: inline-block; background: var(--badge-bg); color: var(--badge-fg); font-size: 12px; padding: 4px 8px; border-radius: 4px; margin-bottom: 10px; }
+  .content-actions { margin: 10px 0 20px; display: flex; gap: 8px; }
+  .content-actions button { padding: 6px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer; }
+  .content-actions button:hover { background: var(--code-bg); }
+  .content-body { line-height: 1.6; font-size: 15px; word-wrap: break-word; }
+  .content-body h1, .content-body h2, .content-body h3 { margin-top: 1.4em; }
+  .content-body table { border-collapse: collapse; margin: 1em 0; max-width: 100%; display: block; overflow-x: auto; }
+  .content-body th, .content-body td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .content-body code { background: var(--code-bg); padding: 2px 5px; border-radius: 4px; font-size: 13px; }
+  .content-body pre { background: var(--code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; }
+  .content-body pre code { background: none; padding: 0; }
+  .placeholder, .loading, .error { color: var(--fg-muted); padding: 40px; text-align: center; }
+  .big-table-controls, .big-text-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .big-table-controls input { flex: 1; min-width: 160px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
+  .big-table-controls button, .big-text-controls button { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer; }
+  #table-count, #text-pos { font-size: 12px; color: var(--fg-muted); }
+  .table-scroll { overflow: auto; max-height: 70vh; border: 1px solid var(--border); }
+  #big-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  #big-table th, #big-table td { border: 1px solid var(--border); padding: 4px 8px; white-space: nowrap; }
+  #big-table thead { position: sticky; top: 0; background: var(--bg-alt); }
+  .big-text-view { max-height: 70vh; overflow: auto; background: var(--code-bg); padding: 12px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+  #status-flash { position: fixed; bottom: 16px; right: 16px; background: var(--accent); color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  #status-flash.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <div id="search-box"><input type="text" id="search-input" placeholder="Search pages..." autofocus></div>
+    <div id="result-count"></div>
+    <ul id="page-list"></ul>
+  </div>
+  <div id="main">
+    <div id="content-pane"><div class="placeholder">Select a page from the list, or search above.</div></div>
+  </div>
+</div>
+<div id="status-flash"></div>
+
+<script src="data/index.js"></script>
+<script>
+"use strict";
+
+var PAGE_CONTENT = {};
+var PAGES_INDEX_BY_ID = {};
+(PAGES_INDEX || []).forEach(function (e) { PAGES_INDEX_BY_ID[e.id] = e; });
+
+// ---------------------------------------------------------------------
+// Markdown rendering (minimal, dependency-free, escapes HTML first)
+// ---------------------------------------------------------------------
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function inlineMd(s) {
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/&lt;(https?:\/\/[^&\s]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  return s;
+}
+
+function splitTableRow(line) {
+  var t = line.trim();
+  if (t.charAt(0) === '|') t = t.slice(1);
+  if (t.charAt(t.length - 1) === '|') t = t.slice(0, -1);
+  return t.split('|').map(function (c) { return c.trim(); });
+}
+
+function mdToHtml(src) {
+  var lines = escapeHtml(src).split('\n');
+  var html = '';
+  var i = 0;
+  var listStack = [];
+
+  function closeListsBelow(indent) {
+    while (listStack.length && listStack[listStack.length - 1].indent >= indent) {
+      html += '</' + listStack.pop().type + '>';
+    }
+  }
+  function closeAllLists() { closeListsBelow(-1); }
+
+  while (i < lines.length) {
+    var line = lines[i];
+
+    if (/^```/.test(line.trim())) {
+      closeAllLists();
+      var code = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) { code.push(lines[i]); i++; }
+      i++;
+      html += '<pre><code>' + code.join('\n') + '</code></pre>';
+      continue;
+    }
+
+    var hm = line.match(/^(#{1,6})\s+(.*)$/);
+    if (hm) {
+      closeAllLists();
+      var level = hm[1].length;
+      html += '<h' + level + '>' + inlineMd(hm[2]) + '</h' + level + '>';
+      i++;
+      continue;
+    }
+
+    if (/^\|.*\|$/.test(line.trim()) && i + 1 < lines.length &&
+        /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/.test(lines[i + 1].trim())) {
+      closeAllLists();
+      var headerCells = splitTableRow(line);
+      i += 2;
+      var bodyRows = [];
+      while (i < lines.length && /^\|.*\|$/.test(lines[i].trim())) {
+        bodyRows.push(splitTableRow(lines[i]));
+        i++;
+      }
+      html += '<table><thead><tr>' + headerCells.map(function (c) { return '<th>' + inlineMd(c) + '</th>'; }).join('') + '</tr></thead><tbody>';
+      bodyRows.forEach(function (row) {
+        html += '<tr>' + row.map(function (c) { return '<td>' + inlineMd(c) + '</td>'; }).join('') + '</tr>';
+      });
+      html += '</tbody></table>';
+      continue;
+    }
+
+    var lm = line.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+    if (lm) {
+      var indent = lm[1].length;
+      var content = lm[3];
+      var type = /\d+\./.test(lm[2]) ? 'ol' : 'ul';
+      while (listStack.length && listStack[listStack.length - 1].indent > indent) {
+        html += '</' + listStack.pop().type + '>';
+      }
+      if (!listStack.length || listStack[listStack.length - 1].indent < indent) {
+        html += '<' + type + '>';
+        listStack.push({ type: type, indent: indent });
+      } else if (listStack[listStack.length - 1].type !== type) {
+        html += '</' + listStack.pop().type + '>';
+        html += '<' + type + '>';
+        listStack.push({ type: type, indent: indent });
+      }
+      html += '<li>' + inlineMd(content) + '</li>';
+      i++;
+      continue;
+    }
+
+    closeAllLists();
+
+    if (line.trim() === '') { i++; continue; }
+
+    var para = [line];
+    i++;
+    while (i < lines.length && lines[i].trim() !== '' &&
+           !/^#{1,6}\s+/.test(lines[i]) &&
+           !/^```/.test(lines[i].trim()) &&
+           !/^\s*([-*]|\d+\.)\s+/.test(lines[i]) &&
+           !/^\|.*\|$/.test(lines[i].trim())) {
+      para.push(lines[i]);
+      i++;
+    }
+    html += '<p>' + inlineMd(para.join(' ')) + '</p>';
+  }
+  closeAllLists();
+  return html;
+}
+
+// ---------------------------------------------------------------------
+// Big table (virtualized) and big text (chunked) renderers
+// ---------------------------------------------------------------------
+
+var tableState = null;
+
+function renderBigTable(content) {
+  var headers = (content.headers && content.headers.length) ? content.headers :
+    ((content.rows[0] || []).map(function (_, idx) { return 'Col ' + (idx + 1); }));
+  tableState = { headers: headers, rows: content.rows, filtered: content.rows, offset: 0, pageSize: 50 };
+
+  var container = document.createElement('div');
+  container.innerHTML =
+    '<div class="big-table-controls">' +
+    '<input type="text" id="table-filter" placeholder="Filter ' + content.rows.length + ' rows...">' +
+    '<span id="table-count"></span>' +
+    '<button id="table-prev">Prev</button>' +
+    '<button id="table-next">Next</button>' +
+    '</div>' +
+    '<div class="table-scroll"><table id="big-table"></table></div>';
+
+  container.querySelector('#table-filter').addEventListener('input', function (e) {
+    var q = e.target.value.toLowerCase();
+    tableState.filtered = q ? tableState.rows.filter(function (r) {
+      return r.some(function (c) { return (c || '').toLowerCase().indexOf(q) !== -1; });
+    }) : tableState.rows;
+    tableState.offset = 0;
+    renderTableWindow(container);
+  });
+  container.querySelector('#table-prev').addEventListener('click', function () {
+    tableState.offset = Math.max(0, tableState.offset - tableState.pageSize);
+    renderTableWindow(container);
+  });
+  container.querySelector('#table-next').addEventListener('click', function () {
+    tableState.offset = Math.min(Math.max(0, tableState.filtered.length - tableState.pageSize), tableState.offset + tableState.pageSize);
+    renderTableWindow(container);
+  });
+
+  renderTableWindow(container);
+  return container;
+}
+
+function renderTableWindow(container) {
+  var headers = tableState.headers, filtered = tableState.filtered, offset = tableState.offset, pageSize = tableState.pageSize;
+  var slice = filtered.slice(offset, offset + pageSize);
+  var html = '<thead><tr>' + headers.map(function (h) { return '<th>' + escapeHtml(h || '') + '</th>'; }).join('') + '</tr></thead><tbody>';
+  slice.forEach(function (row) {
+    html += '<tr>' + headers.map(function (_, idx) { return '<td>' + escapeHtml(row[idx] || '') + '</td>'; }).join('') + '</tr>';
+  });
+  html += '</tbody>';
+  container.querySelector('#big-table').innerHTML = html;
+  container.querySelector('#table-count').textContent =
+    'Rows ' + (filtered.length ? offset + 1 : 0) + '-' + Math.min(offset + pageSize, filtered.length) + ' of ' + filtered.length;
+}
+
+var textState = null;
+
+function renderBigText(content) {
+  textState = { text: content.text, offset: 0, chunkSize: 20000 };
+  var container = document.createElement('div');
+  container.innerHTML =
+    '<div class="big-text-controls">' +
+    '<button id="text-prev">Prev</button>' +
+    '<span id="text-pos"></span>' +
+    '<button id="text-next">Next</button>' +
+    '</div>' +
+    '<pre id="big-text-view" class="big-text-view"></pre>';
+  container.querySelector('#text-prev').addEventListener('click', function () {
+    textState.offset = Math.max(0, textState.offset - textState.chunkSize);
+    renderTextWindow(container);
+  });
+  container.querySelector('#text-next').addEventListener('click', function () {
+    textState.offset = Math.min(Math.max(0, textState.text.length - textState.chunkSize), textState.offset + textState.chunkSize);
+    renderTextWindow(container);
+  });
+  renderTextWindow(container);
+  return container;
+}
+
+function renderTextWindow(container) {
+  var text = textState.text, offset = textState.offset, chunkSize = textState.chunkSize;
+  container.querySelector('#big-text-view').textContent = text.slice(offset, offset + chunkSize);
+  container.querySelector('#text-pos').textContent =
+    'Characters ' + (offset + 1) + '-' + Math.min(offset + chunkSize, text.length) + ' of ' + text.length;
+}
+
+// ---------------------------------------------------------------------
+// Export to Markdown
+// ---------------------------------------------------------------------
+
+function cleanCell(c) {
+  return (c || '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+function toExportMarkdown(entry, content) {
+  if (content.type === 'redirect') {
+    return '# ' + entry.title + '\n\nRedirects to **' + content.target + '**.\n';
+  }
+  if (content.type === 'md') {
+    return '# ' + entry.title + '\n\n' + content.content + '\n';
+  }
+  if (content.type === 'bigtext') {
+    return '# ' + entry.title + '\n\n' + content.text;
+  }
+  if (content.type === 'bigtable') {
+    var headers = (content.headers && content.headers.length) ? content.headers :
+      ((content.rows[0] || []).map(function (_, idx) { return 'Col ' + (idx + 1); }));
+    var width = headers.length;
+    function pad(cells) {
+      cells = cells.slice(0, width).map(cleanCell);
+      while (cells.length < width) cells.push('');
+      return cells;
+    }
+    var lines = ['# ' + entry.title, '', '| ' + pad(headers).join(' | ') + ' |', '|' + new Array(width).fill('---').join('|') + '|'];
+    content.rows.forEach(function (row) { lines.push('| ' + pad(row).join(' | ') + ' |'); });
+    return lines.join('\n');
+  }
+  return '';
+}
+
+function sanitizeFilename(title) {
+  var s = title.replace(/[^A-Za-z0-9 _.-]/g, '_').trim().slice(0, 80);
+  return s || 'page';
+}
+
+function downloadMarkdown(entry, content) {
+  var md = toExportMarkdown(entry, content);
+  var blob = new Blob([md], { type: 'text/markdown' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = sanitizeFilename(entry.title) + '.md';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+function copyMarkdown(entry, content) {
+  var md = toExportMarkdown(entry, content);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(md).then(function () {
+      flashStatus('Copied to clipboard');
+    }, function () {
+      flashStatus('Copy blocked by browser - use Download instead');
+    });
+  } else {
+    flashStatus('Clipboard unavailable - use Download instead');
+  }
+}
+
+var flashTimer = null;
+function flashStatus(msg) {
+  var el = document.getElementById('status-flash');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(function () { el.classList.remove('show'); }, 2000);
+}
+
+// ---------------------------------------------------------------------
+// Page list / selection
+// ---------------------------------------------------------------------
+
+function loadPageContent(id, cb) {
+  if (PAGE_CONTENT[id]) { cb(PAGE_CONTENT[id]); return; }
+  var s = document.createElement('script');
+  s.src = 'data/pages/' + id + '.js';
+  s.onload = function () { cb(PAGE_CONTENT[id]); };
+  s.onerror = function () { cb(null); };
+  document.body.appendChild(s);
+}
+
+function selectPage(id) {
+  var entry = PAGES_INDEX_BY_ID[id];
+  if (!entry) return;
+  var items = document.querySelectorAll('#page-list li');
+  for (var j = 0; j < items.length; j++) {
+    items[j].classList.toggle('active', items[j].dataset.id === String(id));
+  }
+  var pane = document.getElementById('content-pane');
+  pane.innerHTML = '<div class="loading">Loading…</div>';
+  loadPageContent(id, function (content) {
+    if (!content) {
+      pane.innerHTML = '<div class="error">Failed to load page content.</div>';
+      return;
+    }
+    renderPage(entry, content);
+  });
+}
+
+function renderPage(entry, content) {
+  var pane = document.getElementById('content-pane');
+  pane.innerHTML = '';
+
+  var header = document.createElement('div');
+  header.className = 'content-header';
+  var titleEl = document.createElement('h1');
+  titleEl.textContent = entry.title;
+  header.appendChild(titleEl);
+
+  if (entry.access && entry.access.length) {
+    var badge = document.createElement('div');
+    badge.className = 'access-badge';
+    badge.textContent = 'Access (informational only): ' + entry.access.join(' | ');
+    header.appendChild(badge);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'content-actions';
+  var dlBtn = document.createElement('button');
+  dlBtn.textContent = 'Download as .md';
+  dlBtn.onclick = function () { downloadMarkdown(entry, content); };
+  var copyBtn = document.createElement('button');
+  copyBtn.textContent = 'Copy to clipboard';
+  copyBtn.onclick = function () { copyMarkdown(entry, content); };
+  actions.appendChild(dlBtn);
+  actions.appendChild(copyBtn);
+  header.appendChild(actions);
+
+  pane.appendChild(header);
+
+  var body = document.createElement('div');
+  body.className = 'content-body';
+
+  if (content.type === 'redirect') {
+    body.innerHTML = 'Redirects to <strong>' + escapeHtml(content.target) + '</strong>. ';
+    var targetEntry = (PAGES_INDEX || []).find(function (e) { return e.title === content.target; });
+    if (targetEntry) {
+      var link = document.createElement('a');
+      link.href = '#';
+      link.textContent = 'Open target page';
+      link.onclick = function (ev) { ev.preventDefault(); selectPage(targetEntry.id); };
+      body.appendChild(link);
+    }
+  } else if (content.type === 'md') {
+    body.innerHTML = mdToHtml(content.content);
+  } else if (content.type === 'bigtable') {
+    body.appendChild(renderBigTable(content));
+  } else if (content.type === 'bigtext') {
+    body.appendChild(renderBigText(content));
+  }
+
+  pane.appendChild(body);
+}
+
+function renderList(filter) {
+  var list = document.getElementById('page-list');
+  var q = filter.trim().toLowerCase();
+  var items = q ? PAGES_INDEX.filter(function (e) { return e.title.toLowerCase().indexOf(q) !== -1; }) : PAGES_INDEX;
+  list.innerHTML = '';
+  var frag = document.createDocumentFragment();
+  items.forEach(function (e) {
+    var li = document.createElement('li');
+    li.dataset.id = e.id;
+    var label = document.createElement('span');
+    label.textContent = e.title;
+    label.style.flex = '1';
+    label.style.overflow = 'hidden';
+    label.style.textOverflow = 'ellipsis';
+    li.appendChild(label);
+    if (e.redirect) {
+      var t1 = document.createElement('span');
+      t1.className = 'tag redirect-tag';
+      t1.title = 'Redirects to ' + e.redirect;
+      t1.textContent = '↪';
+      li.appendChild(t1);
+    }
+    if (e.access && e.access.length) {
+      var t2 = document.createElement('span');
+      t2.className = 'tag access-tag';
+      t2.title = e.access.join(' | ');
+      t2.textContent = '🔒';
+      li.appendChild(t2);
+    }
+    if (e.big) {
+      var t3 = document.createElement('span');
+      t3.className = 'tag big-tag';
+      t3.textContent = 'big';
+      li.appendChild(t3);
+    }
+    li.addEventListener('click', function () { selectPage(this.dataset.id); });
+    frag.appendChild(li);
+  });
+  list.appendChild(frag);
+  document.getElementById('result-count').textContent = items.length + ' / ' + PAGES_INDEX.length + ' pages';
+}
+
+document.getElementById('search-input').addEventListener('input', function (e) { renderList(e.target.value); });
+renderList('');
+</script>
+</body>
+</html>
