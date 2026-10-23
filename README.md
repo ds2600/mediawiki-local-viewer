@@ -2,16 +2,12 @@
 
 Turn a MediaWiki XML export (`Special:Export`, or a full dump) into a
 searchable, offline, single-folder HTML viewer — no web server, no
-database, no third-party dependencies. Also lets you export any page as
-Markdown for pasting into Confluence or elsewhere.
+database, no third-party dependencies. 
 
 ## Requirements
 
 - Python 3.8+ (standard library only — nothing to `pip install`)
 - Any modern browser
-
-That's it. Clone this repo onto a brand-new machine with no network access
-and it works.
 
 ## Usage
 
