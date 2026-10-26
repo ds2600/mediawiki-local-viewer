@@ -420,7 +420,7 @@ function buildStandaloneHtml(entry, content) {
 
   var vars = 'var tableState = null, textState = null, flashTimer = null, PAGES_INDEX = [];';
   var data = 'var PAGE_ENTRY = ' + JSON.stringify(entry) + ';\nvar PAGE_CONTENT_DATA = ' + JSON.stringify(content) + ';';
-  var boot = 'renderPage(PAGE_ENTRY, PAGE_CONTENT_DATA);';
+  var boot = 'renderPage(PAGE_ENTRY, PAGE_CONTENT_DATA, true);';
   var script = escapeScriptClose(['"use strict";', vars, data, funcs, boot].join('\n'));
 
   return [
@@ -496,7 +496,7 @@ function selectPage(id) {
   });
 }
 
-function renderPage(entry, content) {
+function renderPage(entry, content, standalone) {
   var pane = document.getElementById('content-pane');
   pane.innerHTML = '';
 
@@ -513,24 +513,26 @@ function renderPage(entry, content) {
     header.appendChild(badge);
   }
 
-  var actions = document.createElement('div');
-  actions.className = 'content-actions';
-  var dlBtn = document.createElement('button');
-  dlBtn.textContent = 'Download as .md';
-  dlBtn.onclick = function () { downloadMarkdown(entry, content); };
-  var copyBtn = document.createElement('button');
-  copyBtn.textContent = 'Copy to clipboard';
-  copyBtn.onclick = function () { copyMarkdown(entry, content); };
-  var htmlBtn = document.createElement('button');
-  htmlBtn.textContent = 'Export as standalone HTML';
-  htmlBtn.title = content.type === 'bigtable'
-    ? 'Single HTML file with the full table + search, openable by anyone with no setup'
-    : 'Single HTML file, openable by anyone with no setup';
-  htmlBtn.onclick = function () { downloadStandaloneHtml(entry, content); };
-  actions.appendChild(dlBtn);
-  actions.appendChild(copyBtn);
-  actions.appendChild(htmlBtn);
-  header.appendChild(actions);
+  if (!standalone) {
+    var actions = document.createElement('div');
+    actions.className = 'content-actions';
+    var dlBtn = document.createElement('button');
+    dlBtn.textContent = 'Download as .md';
+    dlBtn.onclick = function () { downloadMarkdown(entry, content); };
+    var copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Copy to clipboard';
+    copyBtn.onclick = function () { copyMarkdown(entry, content); };
+    var htmlBtn = document.createElement('button');
+    htmlBtn.textContent = 'Export as standalone HTML';
+    htmlBtn.title = content.type === 'bigtable'
+      ? 'Single HTML file with the full table + search, openable by anyone with no setup'
+      : 'Single HTML file, openable by anyone with no setup';
+    htmlBtn.onclick = function () { downloadStandaloneHtml(entry, content); };
+    actions.appendChild(dlBtn);
+    actions.appendChild(copyBtn);
+    actions.appendChild(htmlBtn);
+    header.appendChild(actions);
+  }
 
   pane.appendChild(header);
 

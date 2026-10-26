@@ -10,6 +10,7 @@ No third-party dependencies (stdlib only).
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -88,6 +89,23 @@ def strip_simple_inline_html(text):
     return text
 
 
+LT_PLACEHOLDER = '\x02LT\x02'
+GT_PLACEHOLDER = '\x02GT\x02'
+
+
+def decode_safe_html_entities(text):
+    """Decode HTML entities like &nbsp;/&amp;/&eacute; back to real characters
+    so they display properly instead of as literal entity text. &lt;/&gt;
+    are deliberately left alone: those are how authors escape a literal '<'
+    or '>' so it is NOT read as markup (e.g. documenting a <script> tag
+    without it being a real one), and decoding them here would hand raw '<'
+    characters to the HTML promoter later, defeating that escaping."""
+    text = re.sub(r'&lt;', LT_PLACEHOLDER, text, flags=re.IGNORECASE)
+    text = re.sub(r'&gt;', GT_PLACEHOLDER, text, flags=re.IGNORECASE)
+    text = html.unescape(text)
+    return text.replace(LT_PLACEHOLDER, '&lt;').replace(GT_PLACEHOLDER, '&gt;')
+
+
 def strip_parser_output_divs(text):
     """Strip repeated <div class="mw-parser-output"> wrapper noise some
     MediaWiki exports leave around page bodies."""
@@ -135,7 +153,6 @@ EXT_LINK_BARE_RE = re.compile(r'\[(https?://\S+)\]')
 INTERNAL_LINK_RE = re.compile(r'\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]')
 LIST_BULLET_RE = re.compile(r'^(\*+)\s*(.*)$')
 LIST_NUMBER_RE = re.compile(r'^(#+)\s*(.*)$')
-TABLE_BLOCK_RE = re.compile(r'\{\|.*?\n\|\}', re.DOTALL)
 
 
 def convert_inline(text):
@@ -201,9 +218,61 @@ def convert_headings_and_lists(text):
     return '\n'.join(out_lines)
 
 
+CELL_ATTR_RE = re.compile(
+    r'^\s*((?:[a-zA-Z][\w-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s|]+)\s*)+)\|(?!\|)(.*)$',
+    re.DOTALL)
+
+
+def strip_cell_attrs(cell):
+    """MediaWiki table cells may carry HTML-attribute-style metadata before
+    the actual content, separated by its own '|' - e.g.
+    '| style="color:red" | Down' is ONE cell whose text is just 'Down'.
+    Without stripping this, that attribute text leaks into the visible cell
+    AND its embedded '|' gets mistaken for an extra column separator,
+    throwing off every column after it. Guard against misfiring on a cell
+    that legitimately starts with a wikilink/template containing its own
+    '|' (e.g. '[[Page|Label]]') by requiring the part before the pipe to
+    look like actual key=value attributes, not link/template syntax."""
+    m = CELL_ATTR_RE.match(cell)
+    if m and '[[' not in m.group(1) and '{{' not in m.group(1):
+        return m.group(2).strip()
+    return cell.strip()
+
+
+def find_table_blocks(lines):
+    """Scan already-split lines for top-level {| ... |} wikitable blocks,
+    tracking nesting depth so a table nested inside a cell doesn't make the
+    regex-equivalent pairing latch onto the wrong closing '|}' - that was
+    truncating the outer table early and spilling the nested table's own
+    markup into the outer table's rows. Returns (start, end) line-index
+    spans (inclusive); a nested table is left as part of its parent span's
+    text (rendered as literal text within that cell - not perfect, but no
+    longer corrupts the outer table's column alignment)."""
+    spans = []
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i].lstrip().startswith('{|'):
+            start = i
+            depth = 1
+            j = i + 1
+            while j < n and depth > 0:
+                stripped = lines[j].lstrip()
+                if stripped.startswith('{|'):
+                    depth += 1
+                elif stripped.startswith('|}'):
+                    depth -= 1
+                j += 1
+            spans.append((start, j - 1))
+            i = j
+        else:
+            i += 1
+    return spans
+
+
 def parse_wikitable(block_text):
     """Parse a single {| ... |} wikitable block into (headers, rows).
-    Best-effort: does not handle nested tables or templates inside cells."""
+    Best-effort: a nested table inside a cell shows up as literal text in
+    that cell rather than as its own rendered sub-table."""
     lines = block_text.split('\n')
     rows = []
     current = []
@@ -233,24 +302,41 @@ def parse_wikitable(block_text):
             # (often machine-generated) tables sloppily use '||' for header rows
             # too - split on either so we don't end up with one giant cell.
             cells = re.split(r'!!|\|\|', line[1:])
-            current.extend(c.strip() for c in cells)
+            current.extend(strip_cell_attrs(c) for c in cells)
             continue
         if line.startswith('|'):
             cells = line[1:].split('||')
-            current.extend(c.strip() for c in cells)
+            current.extend(strip_cell_attrs(c) for c in cells)
             continue
         # continuation of previous cell's content
         if current:
             current[-1] = (current[-1] + ' ' + line).strip()
     flush()
 
-    headers = []
+    # The header row is normally the first row, but some tables have a
+    # single-cell label/caption row above (or even a second one-cell "!"
+    # title bar before) the real multi-column header - picking literally
+    # "the first row", or even "the first header-marked row", can latch
+    # onto a 1-column title and collapse the whole table. Prefer the
+    # *widest* header-marked ("!") row instead; if no row was ever marked
+    # as a header at all (some tables fake it with '''bold''' text in a
+    # plain data row), fall back to treating the first row as the header -
+    # a common and usually-correct convention.
+    header_candidates = [cells for is_header, cells in rows if is_header]
+    if header_candidates:
+        headers = max(header_candidates, key=len)
+    elif rows:
+        headers = rows[0][1]
+    else:
+        headers = []
+
     data_rows = []
+    header_used = False
     for is_header, cells in rows:
-        if is_header and not data_rows:
-            headers = cells
-        else:
-            data_rows.append(cells)
+        if cells is headers and not header_used:
+            header_used = True
+            continue
+        data_rows.append(cells)
     return headers, data_rows
 
 
@@ -277,15 +363,39 @@ def _pad(cells, width):
 
 
 def find_largest_table(text):
-    """Return (match_object, headers, rows) for the largest {| ... |} block, or None."""
-    best = None
-    for m in TABLE_BLOCK_RE.finditer(text):
-        if best is None or len(m.group(0)) > len(best.group(0)):
-            best = m
-    if best is None:
+    """Return (block_text, headers, rows) for the largest top-level {| ... |}
+    block, or None. Uses find_table_blocks() rather than a regex pair-match
+    so a table nested inside a cell can't fool this into picking (or
+    truncating at) the wrong boundary."""
+    lines = text.split('\n')
+    spans = find_table_blocks(lines)
+    if not spans:
         return None
-    headers, rows = parse_wikitable(best.group(0))
-    return best, headers, rows
+    best_span = max(spans, key=lambda sp: sp[1] - sp[0])
+    block_text = '\n'.join(lines[best_span[0]:best_span[1] + 1])
+    headers, rows = parse_wikitable(block_text)
+    return block_text, headers, rows
+
+
+def replace_wikitables(text):
+    """Replace every top-level {| ... |} wikitable with its Markdown
+    equivalent, using the balanced line-span scanner (see
+    find_table_blocks) instead of a regex pair-match so a table nested
+    inside another table's cell doesn't truncate the outer table early."""
+    lines = text.split('\n')
+    spans = find_table_blocks(lines)
+    if not spans:
+        return text
+    out = []
+    pos = 0
+    for start, end in spans:
+        out.extend(lines[pos:start])
+        block_text = '\n'.join(lines[start:end + 1])
+        headers, rows = parse_wikitable(block_text)
+        out.append(table_to_markdown(headers, rows))
+        pos = end + 1
+    out.extend(lines[pos:])
+    return '\n'.join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -354,12 +464,18 @@ PROMOTABLE_TAGS = {
 }
 # For tags with a clean Markdown equivalent, the exported .md uses that
 # instead of keeping the HTML wrapper. Anything not listed here exports as
-# just its plain inner text/markdown, with the wrapper tag dropped.
+# just its plain inner text/markdown, with the wrapper tag dropped. Most
+# markers are symmetric (same text opening and closing, e.g. '**'); table
+# rows/cells need distinct open/close text so cells don't just run together
+# ("AB" instead of "A | B") - EXPORT_OPEN/EXPORT_CLOSE fall back to
+# EXPORT_WRAP for any tag that doesn't need the asymmetric form.
 EXPORT_WRAP = {
     'b': '**', 'strong': '**',
     'i': '*', 'em': '*',
     's': '~~', 'strike': '~~', 'del': '~~',
 }
+EXPORT_OPEN = dict(EXPORT_WRAP, tr='| ')
+EXPORT_CLOSE = dict(EXPORT_WRAP, td=' | ', th=' | ', tr='\n')
 HARD_DROP_TAGS = {
     'script', 'style', 'iframe', 'object', 'embed', 'form', 'link', 'meta',
     'input', 'button', 'textarea', 'select', 'option', 'applet', 'noscript',
@@ -460,7 +576,7 @@ class HtmlPromoter(HTMLParser):
             if self.buf is None:
                 self.buf = []
             self._write_raw('<%s%s>' % (tag, attrs_to_html(safe_attrs)))
-            self._write_export(EXPORT_WRAP.get(tag, ''))
+            self._write_export(EXPORT_OPEN.get(tag, ''))
             return
 
         # Unknown tag (including things that only look like tags, e.g. Apache
@@ -518,7 +634,7 @@ class HtmlPromoter(HTMLParser):
             self._write_export('](%s)' % frame['href'])
         else:
             self._write_raw('</%s>' % tag)
-            self._write_export(EXPORT_WRAP.get(tag, ''))
+            self._write_export(EXPORT_CLOSE.get(tag, ''))
 
     def _flush_buf(self):
         idx = len(self.html_blocks)
@@ -584,11 +700,7 @@ def convert_page_body(text):
     conversion for normal-sized pages. Best-effort, not a full MediaWiki
     parser - see README for what is and isn't reliably handled."""
     text, code_blocks = protect_code_blocks(text)
-
-    def _table_sub(m):
-        headers, rows = parse_wikitable(m.group(0))
-        return table_to_markdown(headers, rows)
-    text = TABLE_BLOCK_RE.sub(_table_sub, text)
+    text = replace_wikitables(text)
 
     view_text, export_text = run_html_promoter(text)
 
@@ -684,6 +796,7 @@ def build(xml_path, out_dir, include_ns, big_threshold):
         raw_text = strip_parser_output_divs(page['text'])
         raw_text, access_tags = extract_accesscontrol(raw_text)
         raw_text = strip_simple_inline_html(raw_text)
+        raw_text = decode_safe_html_entities(raw_text)
 
         entry = {
             'id': pid,
@@ -699,7 +812,7 @@ def build(xml_path, out_dir, include_ns, big_threshold):
             stats['redirect'] += 1
         elif page['bytes'] > big_threshold:
             found = find_largest_table(raw_text)
-            if found and len(found[0].group(0)) > 0.5 * max(len(raw_text), 1):
+            if found and len(found[0]) > 0.5 * max(len(raw_text), 1):
                 _, headers, rows = found
                 entry['big'] = 'table'
                 content = {'type': 'bigtable', 'headers': headers, 'rows': rows}
